@@ -2423,7 +2423,7 @@
                 // Use the original .upload-preview style but allow multiples
                 container.innerHTML = referenceImagesData.map((img, index) => `
                     <div class="upload-preview" onclick="event.stopPropagation()">
-                        <img src="${img.preview}" alt="预览">
+                        <img src="${img.compositeForGemini || img.preview}" alt="预览">
                         ${img.hasMask ? '<div class="mask-badge" style="position:absolute; top:5px; left:5px; background:var(--accent-blue); color:white; padding:2px 6px; border-radius:4px; font-size:10px;">Masked</div>' : ''}
                         
                         <div style="position:absolute; bottom:5px; left:5px; display:flex; gap:5px;">
@@ -2439,11 +2439,12 @@
         let currentEditingIndex = -1;
 
         // Hook into save function to update specific item (deferred until all scripts loaded)
-        window.addEventListener('load', function() {
+        window.addEventListener('load', function () {
             if (typeof saveInpaintingMask === 'function') {
                 const originalSaveMask = saveInpaintingMask;
                 window.saveInpaintingMask = function () {
                     const canvas = document.getElementById('inpaintingCanvas');
+                    const baseImg = document.getElementById('editorBaseImage');
                     const finalCanvas = document.createElement('canvas');
                     finalCanvas.width = canvas.width; finalCanvas.height = canvas.height;
                     const finalCtx = finalCanvas.getContext('2d');
@@ -2461,9 +2462,27 @@
 
                     const maskBase64 = finalCanvas.toDataURL('image/png');
 
+                    // Generate Composite Image for Gemini (white-out masked areas)
+                    const compositeCanvas = document.createElement('canvas');
+                    compositeCanvas.width = canvas.width;
+                    compositeCanvas.height = canvas.height;
+                    const compositeCtx = compositeCanvas.getContext('2d');
+                    compositeCtx.drawImage(baseImg, 0, 0, canvas.width, canvas.height);
+
+                    const compImageData = compositeCtx.getImageData(0, 0, canvas.width, canvas.height);
+                    const compData = compImageData.data;
+                    for (let i = 0; i < data.length; i += 4) {
+                        if (data[i] === 255) { // If mask is white
+                            compData[i] = 255; compData[i + 1] = 255; compData[i + 2] = 255; compData[i + 3] = 255;
+                        }
+                    }
+                    compositeCtx.putImageData(compImageData, 0, 0);
+                    const compositeBase64 = compositeCanvas.toDataURL('image/jpeg', 0.9);
+
                     // Save to the specific reference item
                     if (currentEditingIndex >= 0 && referenceImagesData[currentEditingIndex]) {
                         referenceImagesData[currentEditingIndex].mask = maskBase64;
+                        referenceImagesData[currentEditingIndex].compositeForGemini = compositeBase64;
                         referenceImagesData[currentEditingIndex].hasMask = true;
                         renderReferencePreviews();
                         showStatus('遮罩已应用到图片', 'success');
@@ -3032,6 +3051,24 @@
             const temperature = document.getElementById('temperature').value;
             const safetySettings = document.getElementById('safetySettings').value;
 
+            // Prepare images payload
+            // Gemini doesn't support mask, so we use the composite white-out image if available
+            let processingRefs = [];
+            if (referenceImagesData.length > 0) {
+                processingRefs = referenceImagesData.map(img => {
+                    if (img.compositeForGemini) {
+                        console.log('Using Composite Image for Gemini Inpainting workaround');
+                        // Extract base64 from dataURL
+                        const matches = img.compositeForGemini.match(/^data:(.+);base64,(.+)$/);
+                        if (matches) {
+                            return { mimeType: matches[1], base64: matches[2] };
+                        }
+                    }
+                    // Fallback to original
+                    return { mimeType: img.mimeType, base64: img.base64 };
+                });
+            }
+
             // Gemini 支持多模态图生图 (Array of images)
             // Note: Gemini Inpainting is not standard, mainly edit via prompt with images. 
             // We pass the mask in the object, assuming backend or model handles it if capable.
@@ -3042,7 +3079,7 @@
                     apiKey: apiKey || undefined,
                     prompt: prompt,
                     negativePrompt: negativePrompt || undefined,
-                    referenceImages: referenceImagesData.length > 0 ? referenceImagesData : undefined,
+                    referenceImages: processingRefs.length > 0 ? processingRefs : undefined,
                     aspectRatio,
                     temperature,
                     safetySettings
@@ -3060,6 +3097,9 @@
             if (negativePrompt) input.negative_prompt = negativePrompt;
             if (seed !== -1) input.seed = seed;
 
+            // DEBUG LOG
+            console.log('Replicate Generate - Reference Data:', referenceImagesData);
+
             // Check for Reference Image & Mask
             if (referenceImagesData.length > 0) {
                 // Replicate Inpainting logic usually requires: image (init) + mask
@@ -3067,9 +3107,12 @@
                 const ref = referenceImagesData[0];
                 input.image = ref.preview; // Base64
                 if (ref.mask) {
+                    console.log('Applying Mask to Replicate Input (Length: ' + ref.mask.length + ')');
                     input.mask = ref.mask; // Base64
                     // Some models use 'mask_image'
                     input.mask_image = ref.mask;
+                } else {
+                    console.log('No Mask found on reference image');
                 }
             }
             const headers = { 'Content-Type': 'application/json' }; if (userToken) headers['Authorization'] = `Bearer ${userToken}`;
@@ -3790,8 +3833,9 @@
 
         function saveInpaintingMask() {
             const canvas = document.getElementById('inpaintingCanvas');
+            const baseImg = document.getElementById('editorBaseImage');
 
-            // Generate Binary Mask
+            // 1. Generate Binary Mask
             const finalCanvas = document.createElement('canvas');
             finalCanvas.width = canvas.width;
             finalCanvas.height = canvas.height;
@@ -3808,18 +3852,82 @@
             const imageData = finalCtx.getImageData(0, 0, finalCanvas.width, finalCanvas.height);
             const data = imageData.data;
             for (let i = 0; i < data.length; i += 4) {
-                if (data[i] > 20) { // If visible
+                // If pixel has alpha/visibility > threshold, make it white
+                if (data[i + 3] > 20) {
                     data[i] = 255; data[i + 1] = 255; data[i + 2] = 255; data[i + 3] = 255;
                 } else {
+                    // Otherwise keep black
                     data[i] = 0; data[i + 1] = 0; data[i + 2] = 0; data[i + 3] = 255;
                 }
             }
             finalCtx.putImageData(imageData, 0, 0);
 
-            // Save Base64
-            currentMaskData = finalCanvas.toDataURL('image/png');
+            // Save Base64 Mask
+            const maskBase64 = finalCanvas.toDataURL('image/png');
+            currentMaskData = maskBase64;
 
-            showStatus('局部重绘遮罩已保存', 'success');
+            // 2. Generate Composite Image for Gemini (Validation for "Inpainting")
+            // Gemini doesn't take a mask, so we paint the masked area WHITE on the original image
+            const compositeCanvas = document.createElement('canvas');
+            compositeCanvas.width = canvas.width;
+            compositeCanvas.height = canvas.height;
+            const compositeCtx = compositeCanvas.getContext('2d');
+
+            // Draw Base Image
+            compositeCtx.drawImage(baseImg, 0, 0, canvas.width, canvas.height);
+
+            // Draw White on masked areas
+            // use 'source-over' but we only want to draw where the MASK is white
+            // We can iterate pixels again or just use the mask we just made
+            // Let's use the mask: destination-out to cut a hole? Or just draw white.
+            // Simpler: Draw the mask canvas (which has strokes) but force it to be white using Composite Ops?
+
+            // Actually, we can just draw the binary mask we created above, but treating white as valid?
+            // No, the binary mask is black background.
+            // Let's just draw the strokes from the editor canvas again, forcing them to be white solid.
+
+            compositeCtx.save();
+            compositeCtx.globalCompositeOperation = 'source-over';
+            // Draw the strokes from the editor canvas (which are semi-transparent white usually)
+            // We want them fully white opaque
+            // Iterate strokes? No, we have the canvas.
+            // Let's use the binary mask, make black transparent, and draw it?
+
+            // Fast way: 
+            // 1. Draw original image
+            // 2. Draw white rectangle over everything using 'source-in' with mask? 
+
+            // Easiest: modifying pixel data of composite based on mask data
+            const compImageData = compositeCtx.getImageData(0, 0, canvas.width, canvas.height);
+            const compData = compImageData.data;
+            // 'data' is our mask data (White=Mask, Black=Keep)
+
+            for (let i = 0; i < data.length; i += 4) {
+                if (data[i] === 255) { // If mask is white
+                    compData[i] = 255;     // R
+                    compData[i + 1] = 255; // G
+                    compData[i + 2] = 255; // B
+                    compData[i + 3] = 255; // Alpha
+                }
+            }
+            compositeCtx.putImageData(compImageData, 0, 0);
+
+            const compositeBase64 = compositeCanvas.toDataURL('image/jpeg', 0.9);
+
+
+            // CRITICAL FIX: Attach mask and composite to the active reference image
+            if (referenceImagesData.length > 0) {
+                // Attach to the first one (most common case for inpainting) or currentReferenceId's match?
+                referenceImagesData[0].mask = maskBase64;
+                referenceImagesData[0].compositeForGemini = compositeBase64; // New field
+
+                if (referenceImageData) {
+                    referenceImageData.mask = maskBase64;
+                    referenceImageData.compositeForGemini = compositeBase64;
+                }
+            }
+
+            showStatus('局部重绘遮罩已保存 (Gemini兼容)', 'success');
             closeInpaintingModal();
 
             // Update UI to show mask is active
