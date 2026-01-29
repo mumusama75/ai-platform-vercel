@@ -99,7 +99,9 @@ app.use('/api/image', imageRoutes); // AI 绘图
 
 // 明确的静态资源目录路由
 app.use('/styles', express.static(path.join(__dirname, 'styles'), { maxAge: '1d' }));
+app.use('/scripts', express.static(path.join(__dirname, 'scripts'), { maxAge: '1d' }));
 app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
+app.use('/components', express.static(path.join(__dirname, 'components'), { maxAge: '1d' }));
 
 // ==================== 前端页面路由 ====================
 
