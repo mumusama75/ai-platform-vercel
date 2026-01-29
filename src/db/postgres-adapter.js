@@ -113,14 +113,27 @@ class PostgresAdapter {
         let paramIndex = 1;
 
         // Replace ? with $1, $2, etc.
-        const pgQuery = query.replace(/\?/g, () => `$${paramIndex++}`);
+        let pgQuery = query.replace(/\?/g, () => `$${paramIndex++}`);
 
-        // Handle LIMIT/OFFSET if needed (syntax is same largely)
+        // Handle INSERT OR IGNORE -> INSERT ... ON CONFLICT DO NOTHING
+        if (pgQuery.toUpperCase().includes('INSERT OR IGNORE')) {
+            pgQuery = pgQuery.replace(/INSERT OR IGNORE/gi, 'INSERT');
+            if (!pgQuery.toUpperCase().includes('ON CONFLICT')) {
+                pgQuery = pgQuery.replace(/VALUES\s*\([^)]+\)/i, (match) => {
+                    return match + ' ON CONFLICT DO NOTHING';
+                });
+            }
+        }
 
         // Handle INSERT ... RETURNING id for lastID emulation
         let finalQuery = pgQuery;
         if (pgQuery.trim().toUpperCase().startsWith('INSERT') && !pgQuery.toUpperCase().includes('RETURNING')) {
-            finalQuery += ' RETURNING id';
+            // Add RETURNING id before ON CONFLICT if present, otherwise at the end
+            if (pgQuery.toUpperCase().includes('ON CONFLICT')) {
+                finalQuery = pgQuery.replace(/ON CONFLICT/i, 'RETURNING id ON CONFLICT');
+            } else {
+                finalQuery = pgQuery + ' RETURNING id';
+            }
         }
 
         return { pgQuery: finalQuery, pgParams: params };

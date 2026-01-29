@@ -119,6 +119,51 @@ async function getDb() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
+
+        CREATE TABLE IF NOT EXISTS forum_posts (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            category TEXT DEFAULT '讨论',
+            author_id TEXT NOT NULL,
+            author_name TEXT,
+            author_avatar TEXT,
+            views INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(author_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS forum_comments (
+            id TEXT PRIMARY KEY,
+            post_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            author_id TEXT NOT NULL,
+            author_name TEXT,
+            author_avatar TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(post_id) REFERENCES forum_posts(id) ON DELETE CASCADE,
+            FOREIGN KEY(author_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS forum_likes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            post_id TEXT,
+            comment_id TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, post_id),
+            UNIQUE(user_id, comment_id),
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+            FOREIGN KEY(post_id) REFERENCES forum_posts(id) ON DELETE CASCADE,
+            FOREIGN KEY(comment_id) REFERENCES forum_comments(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS forum_categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            sort_order INTEGER DEFAULT 0
+        );
     `);
 
     // Schema Migrations (Columns)
@@ -148,6 +193,25 @@ async function getDb() {
             `);
         } catch (e) {
             // Ignore if already exists (Postgres usually requires check first or catch)
+        }
+    }
+
+    // 初始化论坛分类
+    const defaultCategories = ['讨论', '分享', '教程', '求助', '公告'];
+    for (let i = 0; i < defaultCategories.length; i++) {
+        try {
+            await db.run(
+                'INSERT OR IGNORE INTO forum_categories (name, sort_order) VALUES (?, ?)',
+                [defaultCategories[i], i]
+            );
+        } catch (e) {
+            // Postgres 使用 ON CONFLICT DO NOTHING
+            if (process.env.POSTGRES_URL) {
+                await db.run(
+                    'INSERT INTO forum_categories (name, sort_order) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING',
+                    [defaultCategories[i], i]
+                );
+            }
         }
     }
 

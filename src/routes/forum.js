@@ -1,60 +1,77 @@
 const express = require('express');
-const fs = require('fs');
-const path = require('path');
 const { authenticateToken } = require('../middleware/auth');
 const { getDb } = require('../db/database');
 
 const router = express.Router();
-const FORUM_FILE = path.join(__dirname, '../../data', 'forum.json');
-
-// 读取论坛数据
-function getForumData() {
-    try {
-        const data = fs.readFileSync(FORUM_FILE, 'utf8');
-        return JSON.parse(data);
-    } catch (error) {
-        return { posts: [], categories: ['讨论', '分享', '教程', '求助', '公告'] };
-    }
-}
-
-// 保存论坛数据
-function saveForumData(data) {
-    fs.writeFileSync(FORUM_FILE, JSON.stringify(data, null, 2));
-}
 
 // 获取帖子列表
 router.get('/posts', async (req, res) => {
     try {
         const { page = 1, limit = 15, sort = 'latest', category } = req.query;
-        const forumData = getForumData();
-        let posts = [...forumData.posts];
+        const db = await getDb();
+        const offset = (page - 1) * limit;
+
+        let whereClause = '';
+        const params = [];
 
         // 按分类筛选
         if (category && category !== 'all') {
-            posts = posts.filter(p => p.category === category);
+            whereClause = 'WHERE p.category = ?';
+            params.push(category);
         }
 
         // 排序
-        if (sort === 'latest') {
-            posts.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-        } else if (sort === 'hot') {
-            posts.sort((a, b) => (b.comments?.length || 0) - (a.comments?.length || 0));
+        let orderClause = 'ORDER BY p.created_at DESC';
+        if (sort === 'hot') {
+            orderClause = 'ORDER BY comment_count DESC, p.created_at DESC';
         } else if (sort === 'mostLiked') {
-            posts.sort((a, b) => (b.likes?.length || 0) - (a.likes?.length || 0));
+            orderClause = 'ORDER BY like_count DESC, p.created_at DESC';
         }
 
-        // 分页
-        const total = posts.length;
+        // 获取帖子列表（含评论数和点赞数）
+        const posts = await db.all(`
+            SELECT
+                p.*,
+                (SELECT COUNT(*) FROM forum_comments WHERE post_id = p.id) as comment_count,
+                (SELECT COUNT(*) FROM forum_likes WHERE post_id = p.id AND comment_id IS NULL) as like_count
+            FROM forum_posts p
+            ${whereClause}
+            ${orderClause}
+            LIMIT ? OFFSET ?
+        `, [...params, parseInt(limit), offset]);
+
+        // 获取总数
+        const countResult = await db.get(`
+            SELECT COUNT(*) as total FROM forum_posts p ${whereClause}
+        `, params);
+        const total = countResult?.total || 0;
         const totalPages = Math.ceil(total / limit);
-        const start = (page - 1) * limit;
-        const pagePosts = posts.slice(start, start + parseInt(limit));
+
+        // 获取分类
+        const categories = await db.all('SELECT name FROM forum_categories ORDER BY sort_order');
+        const categoryNames = categories.map(c => c.name);
+
+        // 格式化返回数据
+        const formattedPosts = posts.map(p => ({
+            id: p.id,
+            title: p.title,
+            content: p.content,
+            category: p.category,
+            authorId: p.author_id,
+            authorName: p.author_name,
+            authorAvatar: p.author_avatar,
+            createdAt: p.created_at,
+            views: p.views || 0,
+            likes: [],  // 列表页不需要具体的点赞用户
+            comments: []  // 列表页不需要具体评论
+        }));
 
         res.json({
-            posts: pagePosts,
+            posts: formattedPosts,
             totalPages,
             currentPage: parseInt(page),
             total,
-            categories: forumData.categories
+            categories: categoryNames.length > 0 ? categoryNames : ['讨论', '分享', '教程', '求助', '公告']
         });
     } catch (error) {
         console.error('获取帖子列表错误:', error);
@@ -63,19 +80,34 @@ router.get('/posts', async (req, res) => {
 });
 
 // 搜索帖子
-router.get('/search', (req, res) => {
+router.get('/search', async (req, res) => {
     try {
         const { q } = req.query;
         if (!q) return res.json({ posts: [] });
 
-        const forumData = getForumData();
-        const keyword = q.toLowerCase();
-        const posts = forumData.posts.filter(p =>
-            p.title.toLowerCase().includes(keyword) ||
-            p.content.toLowerCase().includes(keyword)
-        );
+        const db = await getDb();
+        const keyword = `%${q.toLowerCase()}%`;
 
-        res.json({ posts });
+        const posts = await db.all(`
+            SELECT * FROM forum_posts
+            WHERE LOWER(title) LIKE ? OR LOWER(content) LIKE ?
+            ORDER BY created_at DESC
+            LIMIT 50
+        `, [keyword, keyword]);
+
+        const formattedPosts = posts.map(p => ({
+            id: p.id,
+            title: p.title,
+            content: p.content,
+            category: p.category,
+            authorId: p.author_id,
+            authorName: p.author_name,
+            authorAvatar: p.author_avatar,
+            createdAt: p.created_at,
+            views: p.views || 0
+        }));
+
+        res.json({ posts: formattedPosts });
     } catch (error) {
         console.error('搜索错误:', error);
         res.status(500).json({ error: '服务器错误' });
@@ -95,26 +127,31 @@ router.post('/posts', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: '标题不能超过100个字符' });
         }
 
-        // 获取用户信息
         const db = await getDb();
+
+        // 获取用户信息
         const user = await db.get('SELECT username, avatar FROM users WHERE id = ?', [req.user.id]);
 
-        const forumData = getForumData();
+        const postId = Date.now().toString();
+        const now = new Date().toISOString();
+
+        await db.run(`
+            INSERT INTO forum_posts (id, title, content, category, author_id, author_name, author_avatar, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [postId, title, content, category || '讨论', req.user.id, user?.username || req.user.username, user?.avatar || '', now, now]);
+
         const newPost = {
-            id: Date.now().toString(),
+            id: postId,
             title,
             content,
             category: category || '讨论',
             authorId: req.user.id,
             authorName: user?.username || req.user.username,
             authorAvatar: user?.avatar || '',
-            createdAt: new Date().toISOString(),
+            createdAt: now,
             likes: [],
             comments: []
         };
-
-        forumData.posts.unshift(newPost);
-        saveForumData(forumData);
 
         res.json({ message: '发布成功', post: newPost });
     } catch (error) {
@@ -124,31 +161,60 @@ router.post('/posts', authenticateToken, async (req, res) => {
 });
 
 // 获取单个帖子详情
-router.get('/posts/:id', (req, res) => {
+router.get('/posts/:id', async (req, res) => {
     try {
         const { id } = req.params;
-        const forumData = getForumData();
-        const postIndex = forumData.posts.findIndex(p => p.id === id);
+        const db = await getDb();
 
-        if (postIndex === -1) {
+        const post = await db.get('SELECT * FROM forum_posts WHERE id = ?', [id]);
+
+        if (!post) {
             return res.status(404).json({ error: '帖子不存在' });
         }
 
-        const post = forumData.posts[postIndex];
-
         // 增加浏览量
-        if (!post.views) post.views = 0;
-        post.views++;
-        saveForumData(forumData);
+        await db.run('UPDATE forum_posts SET views = views + 1 WHERE id = ?', [id]);
 
-        // 转换格式以匹配前端期望
+        // 获取点赞用户
+        const likes = await db.all('SELECT user_id FROM forum_likes WHERE post_id = ? AND comment_id IS NULL', [id]);
+        const likedBy = likes.map(l => l.user_id);
+
+        // 获取评论
+        const comments = await db.all(`
+            SELECT c.*,
+                (SELECT COUNT(*) FROM forum_likes WHERE comment_id = c.id) as like_count
+            FROM forum_comments c
+            WHERE c.post_id = ?
+            ORDER BY c.created_at ASC
+        `, [id]);
+
+        // 获取每个评论的点赞用户
+        for (const comment of comments) {
+            const commentLikes = await db.all('SELECT user_id FROM forum_likes WHERE comment_id = ?', [comment.id]);
+            comment.likedBy = commentLikes.map(l => l.user_id);
+        }
+
         const responsePost = {
-            ...post,
-            likedBy: post.likes || [],  // 前端期望 likedBy 数组
-            likes: (post.likes || []).length,  // 前端期望 likes 是数字
-            comments: (post.comments || []).map(comment => ({
-                ...comment,
-                likes: (comment.likes || []).length  // 评论的 likes 也是数字
+            id: post.id,
+            title: post.title,
+            content: post.content,
+            category: post.category,
+            authorId: post.author_id,
+            authorName: post.author_name,
+            authorAvatar: post.author_avatar,
+            createdAt: post.created_at,
+            views: (post.views || 0) + 1,
+            likedBy: likedBy,
+            likes: likedBy.length,
+            comments: comments.map(c => ({
+                id: c.id,
+                content: c.content,
+                authorId: c.author_id,
+                authorName: c.author_name,
+                authorAvatar: c.author_avatar,
+                createdAt: c.created_at,
+                likes: c.like_count || 0,
+                likedBy: c.likedBy || []
             }))
         };
 
@@ -160,28 +226,43 @@ router.get('/posts/:id', (req, res) => {
 });
 
 // 点赞帖子
-router.post('/posts/:id/like', authenticateToken, (req, res) => {
+router.post('/posts/:id/like', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
-        const forumData = getForumData();
-        const postIndex = forumData.posts.findIndex(p => p.id === id);
+        const db = await getDb();
 
-        if (postIndex === -1) {
+        const post = await db.get('SELECT id FROM forum_posts WHERE id = ?', [id]);
+        if (!post) {
             return res.status(404).json({ error: '帖子不存在' });
         }
 
-        const post = forumData.posts[postIndex];
-        if (!post.likes) post.likes = [];
+        // 检查是否已点赞
+        const existingLike = await db.get(
+            'SELECT id FROM forum_likes WHERE user_id = ? AND post_id = ? AND comment_id IS NULL',
+            [req.user.id, id]
+        );
 
-        const likeIndex = post.likes.indexOf(req.user.id);
-        if (likeIndex === -1) {
-            post.likes.push(req.user.id);
+        let liked;
+        if (existingLike) {
+            // 取消点赞
+            await db.run('DELETE FROM forum_likes WHERE id = ?', [existingLike.id]);
+            liked = false;
         } else {
-            post.likes.splice(likeIndex, 1);
+            // 添加点赞
+            await db.run(
+                'INSERT INTO forum_likes (user_id, post_id) VALUES (?, ?)',
+                [req.user.id, id]
+            );
+            liked = true;
         }
 
-        saveForumData(forumData);
-        res.json({ liked: likeIndex === -1, likes: post.likes.length });
+        // 获取最新点赞数
+        const countResult = await db.get(
+            'SELECT COUNT(*) as count FROM forum_likes WHERE post_id = ? AND comment_id IS NULL',
+            [id]
+        );
+
+        res.json({ liked, likes: countResult?.count || 0 });
     } catch (error) {
         console.error('点赞错误:', error);
         res.status(500).json({ error: '服务器错误' });
@@ -189,22 +270,23 @@ router.post('/posts/:id/like', authenticateToken, (req, res) => {
 });
 
 // 删除帖子
-router.delete('/posts/:id', authenticateToken, (req, res) => {
+router.delete('/posts/:id', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
-        const forumData = getForumData();
-        const postIndex = forumData.posts.findIndex(p => p.id === id);
+        const db = await getDb();
 
-        if (postIndex === -1) {
+        const post = await db.get('SELECT author_id FROM forum_posts WHERE id = ?', [id]);
+
+        if (!post) {
             return res.status(404).json({ error: '帖子不存在' });
         }
 
-        if (forumData.posts[postIndex].authorId !== req.user.id) {
+        if (post.author_id !== req.user.id) {
             return res.status(403).json({ error: '无权删除此帖子' });
         }
 
-        forumData.posts.splice(postIndex, 1);
-        saveForumData(forumData);
+        // 删除帖子（评论和点赞会通过外键级联删除）
+        await db.run('DELETE FROM forum_posts WHERE id = ?', [id]);
 
         res.json({ message: '删除成功' });
     } catch (error) {
@@ -224,29 +306,31 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
         }
 
         const db = await getDb();
-        const user = await db.get('SELECT username, avatar FROM users WHERE id = ?', [req.user.id]);
 
-        const forumData = getForumData();
-        const post = forumData.posts.find(p => p.id === id);
-
+        const post = await db.get('SELECT id FROM forum_posts WHERE id = ?', [id]);
         if (!post) {
             return res.status(404).json({ error: '帖子不存在' });
         }
 
-        if (!post.comments) post.comments = [];
+        const user = await db.get('SELECT username, avatar FROM users WHERE id = ?', [req.user.id]);
+
+        const commentId = Date.now().toString();
+        const now = new Date().toISOString();
+
+        await db.run(`
+            INSERT INTO forum_comments (id, post_id, content, author_id, author_name, author_avatar, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [commentId, id, content, req.user.id, user?.username || req.user.username, user?.avatar || '', now]);
 
         const newComment = {
-            id: Date.now().toString(),
+            id: commentId,
             content,
             authorId: req.user.id,
             authorName: user?.username || req.user.username,
             authorAvatar: user?.avatar || '',
-            createdAt: new Date().toISOString(),
-            likes: []
+            createdAt: now,
+            likes: 0
         };
-
-        post.comments.push(newComment);
-        saveForumData(forumData);
 
         res.json({ message: '评论成功', comment: newComment });
     } catch (error) {
@@ -256,32 +340,40 @@ router.post('/posts/:id/comments', authenticateToken, async (req, res) => {
 });
 
 // 点赞评论
-router.post('/posts/:postId/comments/:commentId/like', authenticateToken, (req, res) => {
+router.post('/posts/:postId/comments/:commentId/like', authenticateToken, async (req, res) => {
     try {
         const { postId, commentId } = req.params;
-        const forumData = getForumData();
-        const post = forumData.posts.find(p => p.id === postId);
+        const db = await getDb();
 
-        if (!post) {
-            return res.status(404).json({ error: '帖子不存在' });
-        }
-
-        const comment = post.comments?.find(c => c.id === commentId);
+        const comment = await db.get('SELECT id FROM forum_comments WHERE id = ? AND post_id = ?', [commentId, postId]);
         if (!comment) {
             return res.status(404).json({ error: '评论不存在' });
         }
 
-        if (!comment.likes) comment.likes = [];
+        // 检查是否已点赞
+        const existingLike = await db.get(
+            'SELECT id FROM forum_likes WHERE user_id = ? AND comment_id = ?',
+            [req.user.id, commentId]
+        );
 
-        const likeIndex = comment.likes.indexOf(req.user.id);
-        if (likeIndex === -1) {
-            comment.likes.push(req.user.id);
+        let liked;
+        if (existingLike) {
+            await db.run('DELETE FROM forum_likes WHERE id = ?', [existingLike.id]);
+            liked = false;
         } else {
-            comment.likes.splice(likeIndex, 1);
+            await db.run(
+                'INSERT INTO forum_likes (user_id, comment_id) VALUES (?, ?)',
+                [req.user.id, commentId]
+            );
+            liked = true;
         }
 
-        saveForumData(forumData);
-        res.json({ liked: likeIndex === -1, likes: comment.likes.length });
+        const countResult = await db.get(
+            'SELECT COUNT(*) as count FROM forum_likes WHERE comment_id = ?',
+            [commentId]
+        );
+
+        res.json({ liked, likes: countResult?.count || 0 });
     } catch (error) {
         console.error('评论点赞错误:', error);
         res.status(500).json({ error: '服务器错误' });
@@ -289,27 +381,25 @@ router.post('/posts/:postId/comments/:commentId/like', authenticateToken, (req, 
 });
 
 // 删除评论
-router.delete('/posts/:postId/comments/:commentId', authenticateToken, (req, res) => {
+router.delete('/posts/:postId/comments/:commentId', authenticateToken, async (req, res) => {
     try {
         const { postId, commentId } = req.params;
-        const forumData = getForumData();
-        const post = forumData.posts.find(p => p.id === postId);
+        const db = await getDb();
 
-        if (!post) {
-            return res.status(404).json({ error: '帖子不存在' });
-        }
+        const comment = await db.get(
+            'SELECT author_id FROM forum_comments WHERE id = ? AND post_id = ?',
+            [commentId, postId]
+        );
 
-        const commentIndex = post.comments?.findIndex(c => c.id === commentId);
-        if (commentIndex === -1) {
+        if (!comment) {
             return res.status(404).json({ error: '评论不存在' });
         }
 
-        if (post.comments[commentIndex].authorId !== req.user.id) {
+        if (comment.author_id !== req.user.id) {
             return res.status(403).json({ error: '无权删除此评论' });
         }
 
-        post.comments.splice(commentIndex, 1);
-        saveForumData(forumData);
+        await db.run('DELETE FROM forum_comments WHERE id = ?', [commentId]);
 
         res.json({ message: '删除成功' });
     } catch (error) {

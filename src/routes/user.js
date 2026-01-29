@@ -9,9 +9,44 @@ const router = express.Router();
 const AVATARS_DIR = path.join(__dirname, '../../data', 'avatars');
 const VALID_API_PROVIDERS = ['gemini', 'replicate'];
 
-// 确保头像目录存在
-if (!fs.existsSync(AVATARS_DIR)) {
+// 确保头像目录存在（仅本地开发环境）
+if (!process.env.VERCEL && !fs.existsSync(AVATARS_DIR)) {
     fs.mkdirSync(AVATARS_DIR, { recursive: true });
+}
+
+// 上传文件到 Vercel Blob 或本地
+async function uploadAvatar(buffer, fileName, mimeType) {
+    // 优先使用 Vercel Blob
+    if (process.env.BLOB_READ_WRITE_TOKEN) {
+        try {
+            const { put } = require('@vercel/blob');
+            const blob = await put(`avatars/${fileName}`, buffer, {
+                access: 'public',
+                contentType: mimeType
+            });
+            return blob.url;
+        } catch (error) {
+            console.error('Vercel Blob Upload Error:', error);
+            throw new Error('云存储上传失败');
+        }
+    }
+
+    // 本地存储（开发环境）
+    if (process.env.VERCEL) {
+        // Vercel 环境但没有 Blob Token，使用 /tmp（临时）
+        const tmpDir = '/tmp/avatars';
+        if (!fs.existsSync(tmpDir)) {
+            fs.mkdirSync(tmpDir, { recursive: true });
+        }
+        const filePath = path.join(tmpDir, fileName);
+        fs.writeFileSync(filePath, buffer);
+        return `/api/tmp/avatars/${fileName}`;
+    }
+
+    // 本地开发环境
+    const filePath = path.join(AVATARS_DIR, fileName);
+    fs.writeFileSync(filePath, buffer);
+    return `/data/avatars/${fileName}`;
 }
 
 // 获取用户信息
@@ -123,22 +158,23 @@ router.post('/avatar', authenticateToken, async (req, res) => {
         const matches = image.match(/^data:image\/(png|jpeg|jpg|gif|webp);base64,(.+)$/);
         if (!matches) return res.status(400).json({ error: '无效格式' });
 
+        const ext = matches[1];
         const buffer = Buffer.from(matches[2], 'base64');
-        if (buffer.length > 2 * 1024 * 1024) return res.status(400).json({ error: '图片过大' });
+        if (buffer.length > 2 * 1024 * 1024) return res.status(400).json({ error: '图片过大（最大2MB）' });
 
-        const fileName = `${req.user.id}_${Date.now()}.${matches[1]}`;
-        const filePath = path.join(AVATARS_DIR, fileName);
+        const fileName = `${req.user.id}_${Date.now()}.${ext}`;
+        const mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
 
-        fs.writeFileSync(filePath, buffer);
+        // 使用统一的上传函数
+        const avatarUrl = await uploadAvatar(buffer, fileName, mimeType);
 
-        const avatarUrl = `/data/avatars/${fileName}`;
         const db = await getDb();
         await db.run('UPDATE users SET avatar = ? WHERE id = ?', [avatarUrl, req.user.id]);
 
         res.json({ message: '头像上传成功', avatar: avatarUrl });
     } catch (error) {
         console.error('头像上传错误:', error);
-        res.status(500).json({ error: '服务器错误' });
+        res.status(500).json({ error: error.message || '服务器错误' });
     }
 });
 
@@ -189,25 +225,8 @@ router.delete('/', authenticateToken, async (req, res) => {
             return res.status(400).json({ error: '密码错误' });
         }
 
-        // 删除用户（关联数据会因 ON DELETE CASCADE 自动删除）
+        // 删除用户（关联数据会因 ON DELETE CASCADE 自动删除，包括论坛帖子、评论、点赞等）
         await db.run('DELETE FROM users WHERE id = ?', [req.user.id]);
-
-        // 删除用户的论坛帖子和评论（forum.json）
-        const FORUM_FILE = path.join(__dirname, '../../data', 'forum.json');
-        if (fs.existsSync(FORUM_FILE)) {
-            try {
-                const forumData = JSON.parse(fs.readFileSync(FORUM_FILE, 'utf8'));
-                forumData.posts = forumData.posts.filter(p => p.authorId !== req.user.id);
-                forumData.posts.forEach(post => {
-                    if (post.comments) {
-                        post.comments = post.comments.filter(c => c.authorId !== req.user.id);
-                    }
-                });
-                fs.writeFileSync(FORUM_FILE, JSON.stringify(forumData, null, 2));
-            } catch (e) {
-                console.error('清理论坛数据失败:', e);
-            }
-        }
 
         res.json({ message: '账户已删除' });
 
