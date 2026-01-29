@@ -95,6 +95,12 @@ app.use('/api/forum', forumRoutes); // 论坛相关
 app.use('/api/chat', chatRoutes); // AI 聊天
 app.use('/api/image', imageRoutes); // AI 绘图
 
+// ==================== 静态资源路由（Vercel 兼容）====================
+
+// 明确的静态资源目录路由
+app.use('/styles', express.static(path.join(__dirname, 'styles'), { maxAge: '1d' }));
+app.use('/assets', express.static(path.join(__dirname, 'assets'), { maxAge: '7d' }));
+
 // ==================== 前端页面路由 ====================
 
 // 明确的 HTML 页面路由（用于 Vercel serverless 兼容）
