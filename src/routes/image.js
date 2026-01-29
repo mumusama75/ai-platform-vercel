@@ -9,9 +9,9 @@ const { getDb } = require('../db/database');
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-key-change-in-production';
 
-// Ensure generated images directory exists
+// Ensure generated images directory exists (only in local environment)
 const GENERATED_DIR = path.join(__dirname, '../../data', 'generated_images');
-if (!fs.existsSync(GENERATED_DIR)) {
+if (!process.env.VERCEL && !fs.existsSync(GENERATED_DIR)) {
     fs.mkdirSync(GENERATED_DIR, { recursive: true });
 }
 
