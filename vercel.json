@@ -7,9 +7,7 @@
         }
     ],
     "rewrites": [
-        { "source": "/api/(.*)", "destination": "/server.js" },
-        { "source": "/data/avatars/(.*)", "destination": "/server.js" },
-        { "source": "/data/generated_images/(.*)", "destination": "/server.js" }
+        { "source": "/(.*)", "destination": "/server.js" }
     ],
     "headers": [
         {
