@@ -95,6 +95,24 @@ app.use('/api/forum', forumRoutes); // 论坛相关
 app.use('/api/chat', chatRoutes); // AI 聊天
 app.use('/api/image', imageRoutes); // AI 绘图
 
+// ==================== 前端页面路由 ====================
+
+// 明确的 HTML 页面路由（用于 Vercel serverless 兼容）
+const htmlPages = ['index', 'login', 'chat', 'forum', 'image', 'profile', 'gemini-chat', 'music', 'agent', 'banana-draw'];
+htmlPages.forEach(page => {
+    app.get(`/${page}`, (req, res) => {
+        res.sendFile(path.join(__dirname, `${page}.html`));
+    });
+    app.get(`/${page}.html`, (req, res) => {
+        res.sendFile(path.join(__dirname, `${page}.html`));
+    });
+});
+
+// 根路由
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 // ==================== 启动服务器 ====================
 
 // 确保必要目录存在 (仅在本地或非只读环境)
