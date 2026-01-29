@@ -41,8 +41,17 @@ async function getDb() {
         console.log('Connecting to Vercel Postgres...');
         db = require('./postgres-adapter');
     } else {
-        // Fallback to SQLite (Local Development)
-        const dbPath = path.join(__dirname, '../../data', 'database.sqlite');
+        // Fallback to SQLite
+        let dbPath;
+        if (process.env.VERCEL) {
+            // Vercel Read-Only environment without Postgres -> Use Ephemeral /tmp
+            console.warn('WARNING: Vercel environment detected but no POSTGRES_URL. Using ephemeral /tmp database. DATA WILL BE LOST on restart.');
+            dbPath = path.join('/tmp', 'database.sqlite');
+        } else {
+            // Local Development
+            dbPath = path.join(__dirname, '../../data', 'database.sqlite');
+        }
+
         db = await open({
             filename: dbPath,
             driver: sqlite3.Database

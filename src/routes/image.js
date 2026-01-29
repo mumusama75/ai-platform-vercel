@@ -52,9 +52,22 @@ async function saveImageToDisk(imageData, userId) {
     }
 
     // Local Filesystem (Fallback)
-    const filepath = path.join(GENERATED_DIR, filename);
+    // On Vercel without Blob, use /tmp (Ephemeral) to avoid crash
+    let saveDir = GENERATED_DIR;
+    let publicPathPrefix = '/data/generated_images';
+
+    if (process.env.VERCEL) {
+        console.warn('WARNING: Vercel environment detected but no BLOB_READ_WRITE_TOKEN. Using ephemeral /tmp storage.');
+        saveDir = path.join('/tmp', 'generated_images');
+        if (!fs.existsSync(saveDir)) {
+            fs.mkdirSync(saveDir, { recursive: true });
+        }
+        publicPathPrefix = '/api/tmp/images';
+    }
+
+    const filepath = path.join(saveDir, filename);
     await fs.promises.writeFile(filepath, buffer);
-    return `/data/generated_images/${filename}`;
+    return `${publicPathPrefix}/${filename}`;
 }
 
 // 获取 API Key 辅助函数 (同时返回用户信息)

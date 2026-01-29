@@ -59,6 +59,11 @@ app.use('/api/', generalLimiter); // 全局限流
 
 // ==================== 静态文件服务 ====================
 
+// Vercel Ephemeral Image Fallback Route
+if (process.env.VERCEL) {
+    app.use('/api/tmp/images', express.static(path.join('/tmp', 'generated_images')));
+}
+
 // 专门为 data 目录提供静态服务（用于访问头像等）
 // 注意：确保不要暴露敏感文件如 database.sqlite
 // 同时提供两个路径以兼容新旧 URL
