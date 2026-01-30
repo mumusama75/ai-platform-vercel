@@ -3035,6 +3035,19 @@
                 // Add all images to history locally
                 // Reverse iterate to keep order in unshift
                 for (let i = images.length - 1; i >= 0; i--) {
+                    // CRITICAL: For non-Gemini providers, we must manually save to server
+                    if (provider !== 'gemini' && userToken) {
+                        try {
+                            const savedPath = await saveImageToServer(images[i], prompt, negativePrompt, params);
+                            // If saved successfully, use the server path or keep base64?
+                            // Using server path is better for localStorage size, but might break preview if path is relative
+                            // The saveImageToServer returns the saved path (e.g. /data/...)
+                            // Let's use the returned path if available, or just log success
+                            console.log('Image saved to server:', savedPath);
+                        } catch (saveErr) {
+                            console.error('Failed to save image to server:', saveErr);
+                        }
+                    }
                     addToHistory(images[i], prompt, currentReferenceId, params);
                 }
 
@@ -3243,15 +3256,174 @@
                 // 如果已经删除够了，或者这个节点被其他节点引用，保留它
                 if (removed >= toRemove || referencedParentIds.has(item.id)) {
                     result.push(item);
-                } else if (i >= history.length - toRemove) {
-                    // 从末尾删除
-                    removed++;
                 } else {
-                    result.push(item);
+                    // 如果还没有删除够，并且不是被引用的父节点，则标记为待删除
+                    // 但这里我们是构建新的数组，所以直接跳过不添加即可
+                    // 只有当 result 长度小于 maxCount 且不是被删除项时才添加
+                    if (result.length < maxCount) {
+                        result.push(item);
+                    } else {
+                        // If we've reached maxCount and this item is not a referenced parent,
+                        // and we still need to remove items, we don't add it.
+                        // This logic needs to be careful about which items are "older"
+                        // The current loop iterates from oldest to newest (index 0 to length-1)
+                        // If history is ordered newest to oldest (as `unshift` suggests),
+                        // then we should iterate backwards or adjust logic.
+                        // Assuming `history` is ordered newest to oldest (from `unshift`):
+                        // We want to keep the `maxCount` newest items, plus any older referenced parents.
+                        // Let's re-think the loop direction or logic.
+
+                        // Simpler approach: filter and then slice
+                        // Filter out items that are not referenced parents and are beyond the maxCount
+                        // This assumes `history` is ordered newest to oldest.
+                        // The `pruneHistoryPreservingRelations` is called after `unshift`, so `history[0]` is newest.
+                        // We want to keep the first `maxCount` items, unless they are not referenced and we have too many.
+
+                        // Let's try a different approach for pruning:
+                        // 1. Keep all referenced parents.
+                        // 2. From the remaining items, keep the newest ones until maxCount is reached.
+                        // This requires a two-pass or careful single-pass.
+
+                        // Given the existing loop structure (i from 0 to length-1),
+                        // and `imageHistory.unshift(newItem)` means `history[0]` is the newest.
+                        // So, `history[i]` for smaller `i` are newer.
+
+                        // Let's re-implement the loop to be clearer:
+                        // We want to keep `maxCount` items.
+                        // Prioritize items that are referenced parents.
+                        // Then, fill up the rest with the newest items.
+
+                        // This `for` loop is iterating from oldest to newest if `history` is from `unshift`.
+                        // If `history` is `[newest, ..., oldest]`, then `i=0` is newest.
+                        // The comment "先保留前面的记录（较新的）" suggests `i=0` is newer.
+
+                        // Let's assume `history` is `[newest, ..., oldest]`
+                        // We want to keep `maxCount` items.
+                        // Iterate from newest to oldest.
+                        // Add to `result` if it's a referenced parent OR if `result.length < maxCount`.
+
+                        // This `for` loop is iterating from `i=0` (newest) to `history.length-1` (oldest).
+                        // So, `result.push(item)` is correct for keeping newer items first.
+                        // The `if (removed >= toRemove || referencedParentIds.has(item.id))` condition is for keeping.
+                        // If `removed < toRemove` AND `!referencedParentIds.has(item.id)`, then this item should be removed.
+                        // The `else if (i >= history.length - toRemove)` part was trying to remove from the end.
+
+                        // Corrected logic for the loop:
+                        // Iterate from newest to oldest.
+                        // If `item` is a referenced parent, always keep it.
+                        // If `item` is NOT a referenced parent, keep it ONLY if we still have space (`result.length < maxCount`).
+
+                        // This means the `result` array should be built by iterating from `history.length - 1` down to `0`
+                        // OR by iterating `0` to `length-1` and then reversing `result` if `unshift` is used.
+
+                        // Let's stick to the user's intent of fixing the existing loop structure.
+                        // The original code was trying to remove from the end of the `history` array.
+                        // If `history` is `[newest, ..., oldest]`, then `history.length - toRemove` is the index
+                        // beyond which items should be removed, unless they are referenced parents.
+
+                        // The `else if (i >= history.length ...` was incomplete.
+                        // The user's provided snippet suggests:
+                        // `else if (i >= history.length) { } else { result.push(item); }`
+                        // This `else if (i >= history.length)` is always false.
+
+                        // Let's assume the intent was to keep `maxCount` items, prioritizing referenced parents.
+                        // A simpler way to achieve this with the current loop direction (newest to oldest):
+                        // 1. Collect all items that are referenced parents.
+                        // 2. Collect the newest `maxCount` items that are not referenced parents.
+                        // 3. Combine and ensure no duplicates.
+
+                        // Given the original structure, the most faithful fix to the missing braces:
+                        // The `else if (i >= history.length - toRemove)` was likely meant to be the condition
+                        // for items that are candidates for removal if they are old enough AND not referenced.
+                        // The `removed++` and `return result.slice(0, maxCount)` suggests an early exit
+                        // once enough items are identified for removal. This is problematic with referenced parents.
+
+                        // Let's use a more standard filter/slice approach for clarity and correctness.
+                        // This will deviate slightly from the incomplete loop, but achieve the goal.
+
+                        const keptItems = [];
+                        const tempHistory = [...history]; // Create a mutable copy if needed, but filter is fine.
+
+                        // First, add all referenced parents
+                        tempHistory.forEach(item => {
+                            if (referencedParentIds.has(item.id)) {
+                                keptItems.push(item);
+                            }
+                        });
+
+                        // Then, add other items until maxCount is reached, prioritizing newer ones
+                        // Iterate from newest (index 0) to oldest
+                        for (let i = 0; i < tempHistory.length && keptItems.length < maxCount; i++) {
+                            const item = tempHistory[i];
+                            if (!referencedParentIds.has(item.id)) { // Only add if not already added as a referenced parent
+                                keptItems.push(item);
+                            }
+                        }
+
+                        // Sort by time to maintain original order if needed, or just return as is.
+                        // Since `history` is already sorted newest to oldest, `keptItems` will also be roughly sorted.
+                        // If `keptItems` has more than `maxCount` due to referenced parents, we need to trim.
+                        // But the logic above ensures `keptItems.length < maxCount` for non-referenced items.
+                        // If `keptItems` contains more than `maxCount` items (because many referenced parents),
+                        // we should keep all referenced parents and then fill up to `maxCount` with newest non-referenced.
+
+                        // Let's refine:
+                        const finalResult = [];
+                        const addedIds = new Set();
+
+                        // 1. Add all referenced parents first
+                        for (const item of history) {
+                            if (referencedParentIds.has(item.id)) {
+                                finalResult.push(item);
+                                addedIds.add(item.id);
+                            }
+                        }
+
+                        // 2. Add remaining newest items until maxCount is reached
+                        for (const item of history) {
+                            if (finalResult.length >= maxCount) break; // Stop if we have enough items
+                            if (!addedIds.has(item.id)) { // Only add if not already added
+                                finalResult.push(item);
+                                addedIds.add(item.id);
+                            }
+                        }
+
+                        // Sort `finalResult` to maintain the newest-first order if it got mixed
+                        finalResult.sort((a, b) => b.time - a.time);
+
+                        return finalResult;
+                    }
                 }
             }
 
-            return result.slice(0, maxCount);
+            return result;
+        }
+
+        async function saveImageToServer(image, prompt, negativePrompt, params) {
+            if (!userToken) return null;
+
+            try {
+                const response = await fetch('/api/image/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${userToken}`
+                    },
+                    body: JSON.stringify({
+                        image,
+                        prompt,
+                        negativePrompt,
+                        params
+                    })
+                });
+
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || '保存失败');
+                return result.path;
+            } catch (error) {
+                console.error('Server save error:', error);
+                throw error;
+            }
         }
 
 
